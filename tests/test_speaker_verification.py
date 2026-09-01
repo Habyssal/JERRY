@@ -1,9 +1,10 @@
 """LOT 1.5 — logique de gating du SpeakerVerificationGate (sans modèle réel).
 
 Vérifie que, selon le score renvoyé par le profil, le gate :
-- accepté  : relâche le segment complet (start -> audio -> stop) vers l'aval + événement RTVI
+- accepté  : relâche le segment complet (start -> preroll -> audio -> stop) + événement RTVI
 - rejeté   : ne laisse RIEN passer sauf l'événement RTVI (le STT ne voit jamais la voix tierce)
-- douteux  : idem rejeté côté frames, mais événement RTVI status=uncertain
+- douteux  : idem rejeté côté frames, avec status=uncertain ; aussi le cas d'un
+  segment trop court avec un score bas (jamais rejeté sec)
 
 Le test avec le vrai modèle ECAPA (discrimination de deux voix) est manuel :
 `tests/manual_speaker_ecapa.py`.
@@ -31,11 +32,12 @@ _CONFIG = SpeakerConfig(
     reject_threshold=0.30,
     enroll_phrases=3,
     enroll_seconds=4.0,
+    min_confident_seconds=0.5,
 )
 
 
 class _FakeEmbedder:
-    def embed_pcm16_voiced(self, pcm: bytes, sample_rate: int = 16000, **_) -> np.ndarray:
+    def embed_float(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         return np.zeros(192, dtype=np.float32)
 
 
@@ -58,9 +60,9 @@ def _gate(score: float) -> SpeakerVerificationGate:
     return gate
 
 
-def _segment() -> list:
-    # 1 s de PCM 16-bit mono (> _MIN_SEGMENT_SECONDS)
-    audio = (np.random.default_rng(0).normal(0, 3000, 16000)).astype(np.int16).tobytes()
+def _segment(seconds: float = 1.0) -> list:
+    n = int(16000 * seconds)
+    audio = (np.random.default_rng(0).normal(0, 3000, n)).astype(np.int16).tobytes()
     return [
         VADUserStartedSpeakingFrame(),
         InputAudioRawFrame(audio=audio, sample_rate=16000, num_channels=1),
@@ -68,11 +70,9 @@ def _segment() -> list:
     ]
 
 
-async def _run(score: float):
-    down, up = await run_test(
-        _gate(score),
-        frames_to_send=_segment(),
-        expected_down_frames=None,
+async def _run(score: float, seconds: float = 1.0):
+    down, _ = await run_test(
+        _gate(score), frames_to_send=_segment(seconds), expected_down_frames=None
     )
     return list(down)
 
@@ -103,6 +103,15 @@ async def test_uncertain_emits_signal_without_forwarding_segment():
     assert down[0].data["status"] == "uncertain"
 
 
+@pytest.mark.asyncio
+async def test_short_low_score_is_uncertain_not_rejected():
+    # 0.3s de voix, score très bas : pas fiable -> douteux, jamais rejeté sec
+    down = await _run(0.05, seconds=0.35)
+    assert [type(f).__name__ for f in down] == ["RTVIServerMessageFrame"]
+    assert down[0].data["status"] == "uncertain"
+    assert down[0].data["short_segment"] is True
+
+
 def test_keep_voiced_trims_silence():
     from front.speaker import audio
 
@@ -113,7 +122,6 @@ def test_keep_voiced_trims_silence():
     trimmed = audio.keep_voiced(
         np.concatenate([silence, speech, silence]), sr, threshold=0.02
     )
-    # on garde la parole + le padding, on jette l'essentiel des 2 s de silence
     assert sr * 0.8 < trimmed.size < sr * 1.6
 
 
@@ -127,5 +135,5 @@ def test_from_embeddings_drops_single_outlier():
     profile = SpeakerProfile.from_embeddings(
         [base, base, tilted, tilted, outlier], sample_rate=16000
     )
-    assert profile.n_phrases == 4  # l'aberrante est écartée
+    assert profile.n_phrases == 4
     assert profile.centroid @ base > 0.98

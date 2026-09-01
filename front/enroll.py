@@ -1,18 +1,19 @@
 """Enrôlement de l'empreinte vocale de l'utilisateur (LOT 1.5).
 
-Enregistre plusieurs phrases de référence au micro (périphérique d'entrée par
-défaut — ici la source anti-echo `jerry_echo_source`, pour rester cohérent avec
-ce que voit le pipeline runtime), découpe les silences, calcule un embedding
-ECAPA-TDNN par phrase, écarte la prise aberrante éventuelle, et persiste le
+Enregistre plusieurs prises de **voix naturelle** au micro (périphérique d'entrée
+par défaut — ici la source anti-echo `jerry_echo_source`, pour rester cohérent
+avec ce que voit le pipeline runtime), découpe les silences, calcule un embedding
+ECAPA-TDNN par prise, écarte la prise aberrante éventuelle, et persiste le
 centroïde normalisé comme profil locuteur.
 
-L'enregistrement de chaque phrase est **à ton rythme** : il démarre sur [Entrée]
-et s'arrête sur [Entrée] (ou au bout de --max-seconds). Lis normalement, avec
-tes vraies pauses.
+Chaque prise est **à ton rythme** : démarre sur [Entrée], arrête sur [Entrée]
+(ou au bout de --max-seconds). Parle comme tu parleras à l'assistant — le
+contenu importe peu (ECAPA est indépendant du texte), c'est le naturel et la
+durée (~10-15 s) qui comptent.
 
     uv run python -m front.enroll                 # enrôlement standard
     uv run python -m front.enroll --list-devices  # lister les micros
-    uv run python -m front.enroll --phrases 6 --device Razer
+    uv run python -m front.enroll --takes 6 --device Razer
 
 Le profil est écrit hors du repo par défaut
 (`~/.local/share/jerry/speaker_profile.npz`) — donnée biométrique, jamais versionnée.
@@ -33,19 +34,23 @@ from front.speaker.config import SpeakerConfig
 from front.speaker.embedding import SpeakerEmbedder
 from front.speaker.profile import SpeakerProfile
 
-_REFERENCE_PHRASES = [
-    "J'active mon assistant. Ceci est ma voix de référence.",
-    "Le chat dort sur le canapé. Dehors, il pleut ce matin.",
-    "Ce soir, je vais cuisiner. Ensuite, je lirai un livre au calme.",
-    "This is my voice. Please remember how it sounds.",
-    "La route est longue. Le chemin monte lentement vers le sommet.",
-    "J'écoute de la musique. Le silence, parfois, me fait du bien.",
-    "Demain, s'il fait beau, nous irons marcher près de la rivière.",
-    "Un, deux, trois. Quatre, cinq, six. Sept, huit, neuf, dix.",
+# Sujets ouverts : l'empreinte doit refléter la façon dont tu parles VRAIMENT à
+# l'assistant (débit, prosodie, distance au micro), pas une lecture appliquée.
+# ECAPA est indépendant du texte : ce qui compte c'est ~8-15 s de voix naturelle
+# par prise, pas le contenu.
+_ENROLL_PROMPTS = [
+    "Raconte ta journée d'hier, en quelques phrases, à voix normale.",
+    "Décris la pièce où tu es : ce que tu vois autour de toi.",
+    "Explique ce que tu attends de cet assistant vocal.",
+    "Parle de quelque chose que tu aimes faire (loisir, sujet, lieu).",
+    "Compte à voix haute de un à vingt, tranquillement, puis dis l'heure qu'il est.",
+    "Dis ce que tu comptes faire ce week-end, ou la semaine prochaine.",
+    "Lis à voix haute le premier paragraphe d'un article ou d'un livre à portée de main.",
+    "Décris le trajet que tu fais le plus souvent (maison, travail, courses).",
 ]
 
 _FRAMES_PER_BUFFER = 1024
-_MIN_VOICED_SECONDS = 1.5  # voix nette exigée par phrase après découpe des silences
+_MIN_VOICED_SECONDS = 4.0  # voix nette exigée par prise (ECAPA a besoin de plusieurs s)
 _MAX_RETRIES = 3
 
 
@@ -110,7 +115,15 @@ def _read_until_enter(
         input_device_index=device_index,
     )
     stop = threading.Event()
-    threading.Thread(target=lambda: (input(), stop.set()), daemon=True).start()
+
+    def _wait_for_enter() -> None:
+        try:
+            input()
+        except EOFError:
+            pass
+        stop.set()
+
+    threading.Thread(target=_wait_for_enter, daemon=True).start()
 
     buffer = bytearray()
     started = time.monotonic()
@@ -137,8 +150,8 @@ def main() -> None:
     config = SpeakerConfig.from_env()
 
     parser = argparse.ArgumentParser(description="Enrôlement empreinte vocale JERRY (LOT 1.5)")
-    parser.add_argument("--phrases", type=int, default=config.enroll_phrases)
-    parser.add_argument("--max-seconds", type=float, default=15.0, help="garde-fou par phrase")
+    parser.add_argument("--takes", type=int, default=6, help="nombre de prises de voix")
+    parser.add_argument("--max-seconds", type=float, default=25.0, help="garde-fou par prise")
     parser.add_argument("--device", default=None, help="index ou sous-chaîne du nom du micro")
     parser.add_argument("--output", default=str(config.profile_path))
     parser.add_argument("--list-devices", action="store_true")
@@ -152,7 +165,7 @@ def main() -> None:
             _list_devices(pa)
             return
 
-        n_phrases = max(3, min(args.phrases, len(_REFERENCE_PHRASES)))
+        n_takes = max(3, min(args.takes, len(_ENROLL_PROMPTS)))
         device_index = _resolve_device(pa, args.device)
 
         embedder = SpeakerEmbedder(device="cpu")
@@ -160,19 +173,19 @@ def main() -> None:
 
         print()
         print("=== Enrôlement locuteur JERRY ===")
-        print(f"{n_phrases} phrases · à ton rythme · profil -> {args.output}")
-        print("Lis NORMALEMENT, avec tes vraies pauses, à distance CONSTANTE du micro.")
-        print("[Entrée] pour démarrer une phrase, [Entrée] à nouveau quand tu as fini.\n")
+        print(f"{n_takes} prises · à ton rythme · profil -> {args.output}")
+        print("Parle NATURELLEMENT, comme tu parleras à l'assistant — pas une lecture")
+        print("appliquée. ~10-15 s par prise. Distance au micro comme à l'usage réel.")
+        print("[Entrée] pour démarrer une prise, [Entrée] à nouveau quand tu as fini.\n")
 
         noise_rms = _measure_noise(pa, config.sample_rate, device_index)
         voiced_threshold = max(0.012, noise_rms * 2.0)
 
         embeddings: list[np.ndarray] = []
         voiced_durations: list[float] = []
-        for idx in range(n_phrases):
-            phrase = _REFERENCE_PHRASES[idx]
-            print(f"[{idx + 1}/{n_phrases}] Lis à voix haute :")
-            print(f"    « {phrase} »")
+        for idx in range(n_takes):
+            prompt = _ENROLL_PROMPTS[idx]
+            print(f"[{idx + 1}/{n_takes}] {prompt}")
 
             for attempt in range(1, _MAX_RETRIES + 1):
                 input("    [Entrée] pour démarrer ")
@@ -188,8 +201,8 @@ def main() -> None:
                 if voiced_s < _MIN_VOICED_SECONDS:
                     print(
                         f"    ⚠️  seulement {voiced_s:.1f}s de voix nette "
-                        f"(min {_MIN_VOICED_SECONDS}s) — on recommence "
-                        f"(essai {attempt}/{_MAX_RETRIES}).\n"
+                        f"(min {_MIN_VOICED_SECONDS}s) — parle plus longuement, "
+                        f"on recommence (essai {attempt}/{_MAX_RETRIES}).\n"
                     )
                     continue
 
@@ -198,11 +211,11 @@ def main() -> None:
                 print(f"    ✓ capturé ({voiced_s:.1f}s de voix nette)\n")
                 break
             else:
-                print("    ✗ phrase abandonnée après plusieurs essais.\n")
+                print("    ✗ prise abandonnée après plusieurs essais.\n")
 
         if len(embeddings) < 3:
             logger.error(
-                f"Seulement {len(embeddings)} phrase(s) exploitable(s) (min 3) — "
+                f"Seulement {len(embeddings)} prise(s) exploitable(s) (min 3) — "
                 f"enrôlement abandonné. Endroit plus calme, micro plus proche, "
                 f"ou --device sur le micro brut."
             )
@@ -212,19 +225,18 @@ def main() -> None:
         written = profile.save(args.output)
 
         to_centroid = profile.embeddings @ profile.centroid
-        min_pair = profile.self_consistency()
         dropped = len(embeddings) - profile.n_phrases
         mean_c = float(to_centroid.mean())
 
         print("=== Profil enregistré ===")
         print(f"  fichier             : {written}")
         print(
-            f"  phrases retenues    : {profile.n_phrases}"
+            f"  prises retenues     : {profile.n_phrases}"
             + (f" ({dropped} écartée(s) comme aberrante(s))" if dropped else "")
         )
-        print(f"  voix nette / phrase : moy {np.mean(voiced_durations):.1f}s")
-        print(f"  phrase <-> centroïde: moy {mean_c:.3f} / min {to_centroid.min():.3f}")
-        print(f"  cohérence min. paire: {min_pair:.3f}")
+        print(f"  voix nette / prise  : moy {np.mean(voiced_durations):.1f}s "
+              f"(total {np.sum(voiced_durations):.0f}s)")
+        print(f"  prise <-> centroïde : moy {mean_c:.3f} / min {to_centroid.min():.3f}")
         print()
 
         if mean_c < 0.45:
@@ -234,15 +246,11 @@ def main() -> None:
             print("      ou enrôler sur le micro brut (`--device Razer`).")
             return
 
-        if mean_c < 0.60:
-            print("  cohérence moyenne : acceptable, mais valide bien au test live")
-            print("  (une voix tierce doit scorer nettement plus bas).")
-
-        lo = round(max(0.05, mean_c - 0.30), 2)
-        hi = round(mean_c - 0.15, 2)
-        print("  Piste de calibrage initiale (à affiner avec un test voix tierce) :")
-        print(f"      export JERRY_SPEAKER_REJECT_THRESHOLD={lo}")
-        print(f"      export JERRY_SPEAKER_ACCEPT_THRESHOLD={hi}")
+        print("  La cohérence d'enrôlement n'est PAS le score runtime attendu :")
+        print("  ta voix en conditions réelles scorera plus bas. Ce qui compte,")
+        print("  c'est l'écart avec une voix tierce — mesure-le au test live, puis :")
+        print("      REJECT = un peu au-dessus du max des scores voix tierce")
+        print("      ACCEPT = un peu en-dessous du min de TES scores (segments > 1.5 s)")
     finally:
         pa.terminate()
 
