@@ -13,9 +13,10 @@ le segment :
   vocale qui consomme ce signal est construite au LOT 2 (décision utilisateur
   2026-09-01) — ni rejet muet, ni acceptation automatique.
 
-Le start/stop VAD et l'audio du segment ne sont **jamais** poussés vers l'aval
-tant que la décision n'est pas prise : le STT ne voit donc jamais de voix tierce
-et son buffer interne ne se pollue pas.
+Le STT ne reçoit **que** les segments explicitement relâchés (`start → audio →
+stop`) : en dehors de ça, aucun frame audio n'est poussé vers l'aval. Sans quoi
+le buffer glissant interne du STT + le pré-roll rejoué se recouvrent et le STT
+transcrit deux fois le début de phrase.
 """
 
 from __future__ import annotations
@@ -76,7 +77,9 @@ class SpeakerVerificationGate(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        # Audio descendant : bufferisé pendant la capture, sinon laissé passer (+ pré-roll).
+        # Audio descendant : jamais poussé tel quel vers l'aval. Pendant la
+        # capture il est bufferisé ; hors capture on garde juste un pré-roll
+        # glissant (contexte d'attaque de phrase) qui sera rejoué à l'acceptation.
         if isinstance(frame, AudioRawFrame) and direction == FrameDirection.DOWNSTREAM:
             if self._capturing:
                 self._segment.append(frame)
@@ -84,7 +87,6 @@ class SpeakerVerificationGate(FrameProcessor):
                 self._preroll += frame.audio
                 if len(self._preroll) > self._preroll_max:
                     del self._preroll[: -self._preroll_max]
-                await self.push_frame(frame, direction)
             return
 
         if isinstance(frame, VADUserStartedSpeakingFrame):
