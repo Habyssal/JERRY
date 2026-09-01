@@ -3,16 +3,21 @@
 | Variable                       | Défaut                                   | Rôle |
 |--------------------------------|------------------------------------------|------|
 | JERRY_SPEAKER_PROFILE          | ~/.local/share/jerry/speaker_profile.npz | chemin du profil enrôlé |
-| JERRY_SPEAKER_ACCEPT_THRESHOLD | 0.45                                     | score cosinus >= seuil -> accepté |
-| JERRY_SPEAKER_REJECT_THRESHOLD | 0.30                                     | score cosinus <  seuil -> rejeté |
-| JERRY_SPEAKER_ENROLL_PHRASES   | 5                                        | nb de phrases de référence à l'enrôlement |
+| JERRY_SPEAKER_ACCEPT_THRESHOLD | 0.28                                     | score cosinus >= seuil -> accepté |
+| JERRY_SPEAKER_REJECT_THRESHOLD | 0.15                                     | score cosinus <  seuil -> rejeté |
+| JERRY_SPEAKER_ENROLL_PHRASES   | 5                                        | (obsolète — voir --takes de front.enroll) |
 | JERRY_SPEAKER_ENROLL_SECONDS   | 4.0                                      | (obsolète — enrôlement au rythme de l'utilisateur) |
 | JERRY_SPEAKER_MIN_CONFIDENT_S  | 1.2                                      | voix nette min. pour une décision fiable ; en-dessous, un score bas -> douteux, pas rejeté |
 
 Entre les deux seuils : zone de doute -> événement RTVI `speaker_verification`
-status=uncertain (matérialisation vocale de la confirmation : LOT 2). Les seuils
-sont à calibrer sur la vraie voix + un test voix tierce (les scores sont logués
-à chaque tour).
+status=uncertain (matérialisation vocale de la confirmation : LOT 2).
+
+Défauts calibrés (2026-09-01) sur la voix de l'utilisateur + un test voix tierce,
+micro Razer via `jerry_echo_source` : voix tierce ≤ 0.08, voix utilisateur
+(segments > 1.8 s) 0.22–0.60. Régime de scores bien plus bas que la cohérence
+d'enrôlement (~0.90) à cause de l'écart de domaine (lecture vs conversationnel) —
+c'est normal, seul l'écart utilisateur/tiers compte. À recalibrer si micro,
+pièce ou profil changent (les scores sont logués à chaque tour).
 """
 
 from __future__ import annotations
@@ -50,8 +55,8 @@ class SpeakerConfig:
             profile_path=Path(
                 os.environ.get("JERRY_SPEAKER_PROFILE", str(DEFAULT_PROFILE_PATH))
             ).expanduser(),
-            accept_threshold=float(os.environ.get("JERRY_SPEAKER_ACCEPT_THRESHOLD", "0.45")),
-            reject_threshold=float(os.environ.get("JERRY_SPEAKER_REJECT_THRESHOLD", "0.30")),
+            accept_threshold=float(os.environ.get("JERRY_SPEAKER_ACCEPT_THRESHOLD", "0.28")),
+            reject_threshold=float(os.environ.get("JERRY_SPEAKER_REJECT_THRESHOLD", "0.15")),
             enroll_phrases=int(os.environ.get("JERRY_SPEAKER_ENROLL_PHRASES", "5")),
             enroll_seconds=float(os.environ.get("JERRY_SPEAKER_ENROLL_SECONDS", "4.0")),
             min_confident_seconds=float(os.environ.get("JERRY_SPEAKER_MIN_CONFIDENT_S", "1.2")),
