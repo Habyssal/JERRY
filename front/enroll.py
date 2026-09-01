@@ -34,19 +34,19 @@ from front.speaker.config import SpeakerConfig
 from front.speaker.embedding import SpeakerEmbedder
 from front.speaker.profile import SpeakerProfile
 
-# Sujets ouverts : l'empreinte doit refléter la façon dont tu parles VRAIMENT à
-# l'assistant (débit, prosodie, distance au micro), pas une lecture appliquée.
-# ECAPA est indépendant du texte : ce qui compte c'est ~8-15 s de voix naturelle
-# par prise, pas le contenu.
+# Enrôlement MULTI-CONDITIONS : l'empreinte doit couvrir ta variabilité réelle
+# (sourire, distance, intonation, mouvement), pas une seule façon de parler.
+# ECAPA est indépendant du texte : c'est la CONDITION demandée qui compte, dis ce
+# que tu veux, ~10-15 s par prise.
 _ENROLL_PROMPTS = [
-    "Raconte ta journée d'hier, en quelques phrases, à voix normale.",
-    "Décris la pièce où tu es : ce que tu vois autour de toi.",
-    "Explique ce que tu attends de cet assistant vocal.",
-    "Parle de quelque chose que tu aimes faire (loisir, sujet, lieu).",
-    "Compte à voix haute de un à vingt, tranquillement, puis dis l'heure qu'il est.",
-    "Dis ce que tu comptes faire ce week-end, ou la semaine prochaine.",
-    "Lis à voix haute le premier paragraphe d'un article ou d'un livre à portée de main.",
-    "Décris le trajet que tu fais le plus souvent (maison, travail, courses).",
+    "Voix NORMALE, à ta distance habituelle : raconte ta journée d'hier.",
+    "EN SOURIANT franchement pendant que tu parles : décris la pièce où tu es.",
+    "Recule à ~50 cm du micro : explique ce que tu attends de cet assistant.",
+    "Près du micro, voix DOUCE, presque à voix basse : parle d'un truc que tu aimes.",
+    "Avec ÉNERGIE, un peu fort, enthousiaste : parle de tes projets du week-end.",
+    "En BOUGEANT un peu la tête / en te tournant légèrement, ton normal : compte de 1 à 30.",
+    "Débit RAPIDE, comme quand tu es pressé : décris ton trajet habituel.",
+    "Voix POSÉE et lente : lis un court paragraphe d'un texte à portée de main.",
 ]
 
 _FRAMES_PER_BUFFER = 1024
@@ -151,7 +151,7 @@ def main() -> None:
     config = SpeakerConfig.from_env()
 
     parser = argparse.ArgumentParser(description="Enrôlement empreinte vocale JERRY (LOT 1.5)")
-    parser.add_argument("--takes", type=int, default=6, help="nombre de prises de voix")
+    parser.add_argument("--takes", type=int, default=8, help="nombre de prises de voix (conditions)")
     parser.add_argument("--max-seconds", type=float, default=25.0, help="garde-fou par prise")
     parser.add_argument("--device", default=None, help="index ou sous-chaîne du nom du micro")
     parser.add_argument("--output", default=str(config.profile_path))

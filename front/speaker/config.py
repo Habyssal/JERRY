@@ -7,7 +7,7 @@
 | JERRY_SPEAKER_REJECT_THRESHOLD | 0.15                                     | score cosinus <  seuil -> rejeté |
 | JERRY_SPEAKER_ENROLL_PHRASES   | 5                                        | (obsolète — voir --takes de front.enroll) |
 | JERRY_SPEAKER_ENROLL_SECONDS   | 4.0                                      | (obsolète — enrôlement au rythme de l'utilisateur) |
-| JERRY_SPEAKER_MIN_CONFIDENT_S  | 1.2                                      | voix nette min. pour une décision fiable ; en-dessous, un score bas -> douteux, pas rejeté |
+| JERRY_SPEAKER_MIN_CONFIDENT_S  | 1.0                                      | voix nette min. pour une décision fiable ; en-dessous, un score bas -> douteux, pas rejeté |
 
 Entre les deux seuils : zone de doute -> événement RTVI `speaker_verification`
 status=uncertain (matérialisation vocale de la confirmation : LOT 2).
@@ -39,7 +39,7 @@ class SpeakerConfig:
     reject_threshold: float
     enroll_phrases: int
     enroll_seconds: float
-    min_confident_seconds: float = 1.2
+    min_confident_seconds: float = 1.0
     sample_rate: int = SAMPLE_RATE
 
     def __post_init__(self) -> None:
@@ -59,5 +59,5 @@ class SpeakerConfig:
             reject_threshold=float(os.environ.get("JERRY_SPEAKER_REJECT_THRESHOLD", "0.15")),
             enroll_phrases=int(os.environ.get("JERRY_SPEAKER_ENROLL_PHRASES", "5")),
             enroll_seconds=float(os.environ.get("JERRY_SPEAKER_ENROLL_SECONDS", "4.0")),
-            min_confident_seconds=float(os.environ.get("JERRY_SPEAKER_MIN_CONFIDENT_S", "1.2")),
+            min_confident_seconds=float(os.environ.get("JERRY_SPEAKER_MIN_CONFIDENT_S", "1.0")),
         )

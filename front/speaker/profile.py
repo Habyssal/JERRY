@@ -43,13 +43,15 @@ class SpeakerProfile:
         embeddings: list[np.ndarray],
         *,
         sample_rate: int,
-        drop_outliers: bool = True,
-        outlier_margin: float = 0.15,
+        drop_outliers: bool = False,
+        outlier_margin: float = 0.35,
     ) -> "SpeakerProfile":
-        """Construit le profil à partir des embeddings de référence. Si
-        `drop_outliers`, écarte les prises dont la similarité au centroïde est
-        inférieure de plus de `outlier_margin` à la moyenne (une seule prise
-        instable suffit à polluer le centroïde), tant qu'il reste >= 3 prises."""
+        """Construit le profil à partir des embeddings de référence.
+
+        `drop_outliers` est **désactivé par défaut** : l'enrôlement est maintenant
+        volontairement multi-conditions (sourire, distance, intonation), donc une
+        prise « éloignée » du centroïde est un signal utile, pas du bruit. Ne
+        l'activer que pour un enrôlement mono-condition."""
         stack = np.vstack(embeddings).astype(np.float32)
 
         if drop_outliers:
@@ -69,9 +71,14 @@ class SpeakerProfile:
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
 
-    def similarity(self, embedding: np.ndarray) -> float:
-        """Similarité cosinus au centroïde (les deux vecteurs sont L2-normalisés)."""
-        return float(np.dot(self.centroid, embedding.astype(np.float32)))
+    def similarity(self, embedding: np.ndarray, *, top_k: int = 3) -> float:
+        """Score de reconnaissance : moyenne des `top_k` meilleures similarités
+        cosinus aux prises d'enrôlement individuelles (pas au centroïde unique,
+        trop étroit face à la variabilité réelle — sourire, distance, intonation).
+        Il suffit qu'une poignée de conditions enrôlées correspondent."""
+        sims = self.embeddings @ embedding.astype(np.float32)
+        k = max(1, min(top_k, sims.size))
+        return float(np.sort(sims)[-k:].mean())
 
     def self_consistency(self) -> float:
         """Similarité cosinus minimale entre phrases de référence — sanity check d'enrôlement."""

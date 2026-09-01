@@ -125,7 +125,7 @@ def test_keep_voiced_trims_silence():
     assert sr * 0.8 < trimmed.size < sr * 1.6
 
 
-def test_from_embeddings_drops_single_outlier():
+def test_from_embeddings_drops_single_outlier_when_asked():
     from front.speaker.profile import SpeakerProfile
 
     base = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -133,7 +133,31 @@ def test_from_embeddings_drops_single_outlier():
     tilted /= np.linalg.norm(tilted)
     outlier = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     profile = SpeakerProfile.from_embeddings(
-        [base, base, tilted, tilted, outlier], sample_rate=16000
+        [base, base, tilted, tilted, outlier], sample_rate=16000, drop_outliers=True
     )
     assert profile.n_phrases == 4
     assert profile.centroid @ base > 0.98
+
+
+def test_from_embeddings_keeps_varied_takes_by_default():
+    from front.speaker.profile import SpeakerProfile
+
+    normal = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    smiling = np.array([0.6, 0.8, 0.0], dtype=np.float32)  # condition très différente
+    profile = SpeakerProfile.from_embeddings(
+        [normal, normal, normal, smiling], sample_rate=16000
+    )
+    assert profile.n_phrases == 4  # la prise "sourire" est conservée
+
+
+def test_similarity_is_top_k_mean_not_centroid():
+    from front.speaker.profile import SpeakerProfile
+
+    normal = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    minority = np.array([0.0, 1.0, 0.0], dtype=np.float32)  # une condition rare enrôlée
+    profile = SpeakerProfile.from_embeddings(
+        [normal, normal, normal, normal, minority], sample_rate=16000
+    )
+    # une requête proche de la condition rare : le centroïde (dominé par "normal")
+    # la voit mal, le score top-k la rattrape via la prise "minority".
+    assert profile.similarity(minority) > float(profile.centroid @ minority)
