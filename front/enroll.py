@@ -6,9 +6,13 @@ ce que voit le pipeline runtime), découpe les silences, calcule un embedding
 ECAPA-TDNN par phrase, écarte la prise aberrante éventuelle, et persiste le
 centroïde normalisé comme profil locuteur.
 
+L'enregistrement de chaque phrase est **à ton rythme** : il démarre sur [Entrée]
+et s'arrête sur [Entrée] (ou au bout de --max-seconds). Lis normalement, avec
+tes vraies pauses.
+
     uv run python -m front.enroll                 # enrôlement standard
     uv run python -m front.enroll --list-devices  # lister les micros
-    uv run python -m front.enroll --phrases 6 --seconds 5 --device Razer
+    uv run python -m front.enroll --phrases 6 --device Razer
 
 Le profil est écrit hors du repo par défaut
 (`~/.local/share/jerry/speaker_profile.npz`) — donnée biométrique, jamais versionnée.
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 
 import numpy as np
@@ -29,18 +34,18 @@ from front.speaker.embedding import SpeakerEmbedder
 from front.speaker.profile import SpeakerProfile
 
 _REFERENCE_PHRASES = [
-    "Bonjour, c'est moi. Je vérifie que tu reconnais bien ma voix ce matin.",
-    "Le petit chat dort tranquillement sur le canapé pendant que la pluie tombe dehors.",
-    "Aujourd'hui je vais préparer le déjeuner, puis sortir faire quelques courses en ville.",
-    "One, two, three, four, five — this is my voice for the speaker verification test.",
-    "La montagne est haute et le sentier qui mène au sommet est long, escarpé et sinueux.",
-    "J'aime écouter de la musique le soir, en lisant un bon livre, au calme, sans écran.",
-    "Il faut battre le fer tant qu'il est chaud, dit le vieux proverbe que tout le monde connaît.",
-    "Demain, s'il fait beau, nous irons marcher le long de la rivière jusqu'au vieux pont de pierre.",
+    "J'active mon assistant. Ceci est ma voix de référence.",
+    "Le chat dort sur le canapé. Dehors, il pleut ce matin.",
+    "Ce soir, je vais cuisiner. Ensuite, je lirai un livre au calme.",
+    "This is my voice. Please remember how it sounds.",
+    "La route est longue. Le chemin monte lentement vers le sommet.",
+    "J'écoute de la musique. Le silence, parfois, me fait du bien.",
+    "Demain, s'il fait beau, nous irons marcher près de la rivière.",
+    "Un, deux, trois. Quatre, cinq, six. Sept, huit, neuf, dix.",
 ]
 
 _FRAMES_PER_BUFFER = 1024
-_MIN_VOICED_SECONDS = 1.3  # voix nette exigée par phrase après découpe des silences
+_MIN_VOICED_SECONDS = 1.5  # voix nette exigée par phrase après découpe des silences
 _MAX_RETRIES = 3
 
 
@@ -72,7 +77,7 @@ def _resolve_device(pa, wanted: str | None) -> int | None:
     sys.exit(2)
 
 
-def _record(pa, seconds: float, sample_rate: int, device_index: int | None) -> np.ndarray:
+def _read_fixed(pa, seconds: float, sample_rate: int, device_index: int | None) -> np.ndarray:
     stream = pa.open(
         format=8,  # pyaudio.paInt16
         channels=1,
@@ -92,19 +97,38 @@ def _record(pa, seconds: float, sample_rate: int, device_index: int | None) -> n
     return _audio.to_float(bytes(buffer))
 
 
-def _countdown(prefix: str) -> None:
-    for n in (3, 2, 1):
-        print(f"\r{prefix} — {n}...  ", end="", flush=True)
-        time.sleep(0.7)
-    print("\r" + " " * (len(prefix) + 14) + "\r", end="", flush=True)
+def _read_until_enter(
+    pa, max_seconds: float, sample_rate: int, device_index: int | None
+) -> np.ndarray:
+    """Enregistre jusqu'à ce que l'utilisateur appuie sur [Entrée] (ou max_seconds)."""
+    stream = pa.open(
+        format=8,
+        channels=1,
+        rate=sample_rate,
+        input=True,
+        frames_per_buffer=_FRAMES_PER_BUFFER,
+        input_device_index=device_index,
+    )
+    stop = threading.Event()
+    threading.Thread(target=lambda: (input(), stop.set()), daemon=True).start()
+
+    buffer = bytearray()
+    started = time.monotonic()
+    try:
+        while not stop.is_set() and (time.monotonic() - started) < max_seconds:
+            buffer += stream.read(_FRAMES_PER_BUFFER, exception_on_overflow=False)
+    finally:
+        stream.stop_stream()
+        stream.close()
+    return _audio.to_float(bytes(buffer))
 
 
 def _measure_noise(pa, sample_rate: int, device_index: int | None) -> float:
-    print("Mesure du bruit de fond — reste **silencieux** 2 secondes...", flush=True)
+    print("Mesure du bruit de fond — reste SILENCIEUX 2 secondes...", flush=True)
     time.sleep(0.4)
-    samples = _record(pa, 2.0, sample_rate, device_index)
+    samples = _read_fixed(pa, 2.0, sample_rate, device_index)
     noise = _audio.rms(samples)
-    verdict = "ok" if noise < 0.015 else "élevé — pense à réduire le bruit / le gain micro"
+    verdict = "ok" if noise < 0.015 else "élevé — réduis le bruit ambiant ou le gain micro"
     print(f"  bruit de fond RMS = {noise:.4f}  ({verdict})\n")
     return noise
 
@@ -114,7 +138,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Enrôlement empreinte vocale JERRY (LOT 1.5)")
     parser.add_argument("--phrases", type=int, default=config.enroll_phrases)
-    parser.add_argument("--seconds", type=float, default=config.enroll_seconds)
+    parser.add_argument("--max-seconds", type=float, default=15.0, help="garde-fou par phrase")
     parser.add_argument("--device", default=None, help="index ou sous-chaîne du nom du micro")
     parser.add_argument("--output", default=str(config.profile_path))
     parser.add_argument("--list-devices", action="store_true")
@@ -136,8 +160,9 @@ def main() -> None:
 
         print()
         print("=== Enrôlement locuteur JERRY ===")
-        print(f"{n_phrases} phrases · {args.seconds:.0f}s chacune · profil -> {args.output}")
-        print("Parle normalement, à ton débit habituel, à distance constante du micro.\n")
+        print(f"{n_phrases} phrases · à ton rythme · profil -> {args.output}")
+        print("Lis NORMALEMENT, avec tes vraies pauses, à distance CONSTANTE du micro.")
+        print("[Entrée] pour démarrer une phrase, [Entrée] à nouveau quand tu as fini.\n")
 
         noise_rms = _measure_noise(pa, config.sample_rate, device_index)
         voiced_threshold = max(0.012, noise_rms * 2.0)
@@ -150,10 +175,11 @@ def main() -> None:
             print(f"    « {phrase} »")
 
             for attempt in range(1, _MAX_RETRIES + 1):
-                input("    (Entrée quand tu es prêt) ")
-                _countdown("    Enregistrement dans")
-                print("    🎙️  ... parle maintenant", flush=True)
-                samples = _record(pa, args.seconds, config.sample_rate, device_index)
+                input("    [Entrée] pour démarrer ")
+                print("    🎙️  enregistrement — parle, puis [Entrée] pour arrêter", flush=True)
+                samples = _read_until_enter(
+                    pa, args.max_seconds, config.sample_rate, device_index
+                )
 
                 voiced = _audio.keep_voiced(
                     samples, config.sample_rate, threshold=voiced_threshold
@@ -161,8 +187,8 @@ def main() -> None:
                 voiced_s = voiced.size / config.sample_rate
                 if voiced_s < _MIN_VOICED_SECONDS:
                     print(
-                        f"    ⚠️  seulement {voiced_s:.1f}s de voix nette détectée "
-                        f"(min {_MIN_VOICED_SECONDS}s) — on recommence cette phrase "
+                        f"    ⚠️  seulement {voiced_s:.1f}s de voix nette "
+                        f"(min {_MIN_VOICED_SECONDS}s) — on recommence "
                         f"(essai {attempt}/{_MAX_RETRIES}).\n"
                     )
                     continue
@@ -177,35 +203,46 @@ def main() -> None:
         if len(embeddings) < 3:
             logger.error(
                 f"Seulement {len(embeddings)} phrase(s) exploitable(s) (min 3) — "
-                f"enrôlement abandonné. Réessaie dans un endroit plus calme, "
-                f"micro plus proche, ou --device sur le micro brut."
+                f"enrôlement abandonné. Endroit plus calme, micro plus proche, "
+                f"ou --device sur le micro brut."
             )
             sys.exit(1)
 
         profile = SpeakerProfile.from_embeddings(embeddings, sample_rate=config.sample_rate)
         written = profile.save(args.output)
 
-        consistency = profile.self_consistency()
-        pairwise = profile.embeddings @ profile.centroid
+        to_centroid = profile.embeddings @ profile.centroid
+        min_pair = profile.self_consistency()
         dropped = len(embeddings) - profile.n_phrases
+        mean_c = float(to_centroid.mean())
+
         print("=== Profil enregistré ===")
-        print(f"  fichier            : {written}")
-        print(f"  phrases retenues   : {profile.n_phrases}" + (f" ({dropped} écartée(s))" if dropped else ""))
-        print(f"  voix nette / phrase: moy {np.mean(voiced_durations):.1f}s")
-        print(f"  cohérence interne  : {consistency:.3f} (min. cosinus entre phrases)")
-        print(f"  phrase<->centroïde : min {pairwise.min():.3f} / moy {pairwise.mean():.3f}")
+        print(f"  fichier             : {written}")
+        print(
+            f"  phrases retenues    : {profile.n_phrases}"
+            + (f" ({dropped} écartée(s) comme aberrante(s))" if dropped else "")
+        )
+        print(f"  voix nette / phrase : moy {np.mean(voiced_durations):.1f}s")
+        print(f"  phrase <-> centroïde: moy {mean_c:.3f} / min {to_centroid.min():.3f}")
+        print(f"  cohérence min. paire: {min_pair:.3f}")
         print()
-        if consistency < 0.55:
-            print("  ⚠️  cohérence encore faible malgré la découpe des silences.")
-            print("      Pistes : endroit plus calme, distance au micro vraiment constante,")
-            print("      baisser le gain (`pactl set-source-volume <source> 60%`),")
+
+        if mean_c < 0.45:
+            print("  ⚠️  cohérence trop faible — le profil sera peu fiable.")
+            print("      Endroit plus calme, distance au micro VRAIMENT constante,")
+            print("      baisser le gain (`pactl set-source-volume jerry_echo_source 60%`),")
             print("      ou enrôler sur le micro brut (`--device Razer`).")
-        else:
-            lo = round(max(0.0, pairwise.mean() - 0.20), 2)
-            hi = round(max(lo + 0.05, pairwise.mean() - 0.08), 2)
-            print("  Piste de calibrage initiale (à affiner avec un test voix tierce) :")
-            print(f"      export JERRY_SPEAKER_REJECT_THRESHOLD={lo}")
-            print(f"      export JERRY_SPEAKER_ACCEPT_THRESHOLD={hi}")
+            return
+
+        if mean_c < 0.60:
+            print("  cohérence moyenne : acceptable, mais valide bien au test live")
+            print("  (une voix tierce doit scorer nettement plus bas).")
+
+        lo = round(max(0.05, mean_c - 0.30), 2)
+        hi = round(mean_c - 0.15, 2)
+        print("  Piste de calibrage initiale (à affiner avec un test voix tierce) :")
+        print(f"      export JERRY_SPEAKER_REJECT_THRESHOLD={lo}")
+        print(f"      export JERRY_SPEAKER_ACCEPT_THRESHOLD={hi}")
     finally:
         pa.terminate()
 
