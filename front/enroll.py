@@ -2,8 +2,9 @@
 
 Enregistre plusieurs phrases de référence au micro (périphérique d'entrée par
 défaut — ici la source anti-echo `jerry_echo_source`, pour rester cohérent avec
-ce que voit le pipeline runtime), calcule un embedding ECAPA-TDNN par phrase, et
-persiste le centroïde normalisé comme profil locuteur.
+ce que voit le pipeline runtime), découpe les silences, calcule un embedding
+ECAPA-TDNN par phrase, écarte la prise aberrante éventuelle, et persiste le
+centroïde normalisé comme profil locuteur.
 
     uv run python -m front.enroll                 # enrôlement standard
     uv run python -m front.enroll --list-devices  # lister les micros
@@ -22,6 +23,7 @@ import time
 import numpy as np
 from loguru import logger
 
+from front.speaker import audio as _audio
 from front.speaker.config import SpeakerConfig
 from front.speaker.embedding import SpeakerEmbedder
 from front.speaker.profile import SpeakerProfile
@@ -38,6 +40,8 @@ _REFERENCE_PHRASES = [
 ]
 
 _FRAMES_PER_BUFFER = 1024
+_MIN_VOICED_SECONDS = 1.3  # voix nette exigée par phrase après découpe des silences
+_MAX_RETRIES = 3
 
 
 def _list_devices(pa) -> None:
@@ -68,7 +72,7 @@ def _resolve_device(pa, wanted: str | None) -> int | None:
     sys.exit(2)
 
 
-def _record(pa, seconds: float, sample_rate: int, device_index: int | None) -> bytes:
+def _record(pa, seconds: float, sample_rate: int, device_index: int | None) -> np.ndarray:
     stream = pa.open(
         format=8,  # pyaudio.paInt16
         channels=1,
@@ -85,14 +89,24 @@ def _record(pa, seconds: float, sample_rate: int, device_index: int | None) -> b
     finally:
         stream.stop_stream()
         stream.close()
-    return bytes(buffer)
+    return _audio.to_float(bytes(buffer))
 
 
 def _countdown(prefix: str) -> None:
     for n in (3, 2, 1):
         print(f"\r{prefix} — {n}...  ", end="", flush=True)
         time.sleep(0.7)
-    print("\r" + " " * (len(prefix) + 12) + "\r", end="", flush=True)
+    print("\r" + " " * (len(prefix) + 14) + "\r", end="", flush=True)
+
+
+def _measure_noise(pa, sample_rate: int, device_index: int | None) -> float:
+    print("Mesure du bruit de fond — reste **silencieux** 2 secondes...", flush=True)
+    time.sleep(0.4)
+    samples = _record(pa, 2.0, sample_rate, device_index)
+    noise = _audio.rms(samples)
+    verdict = "ok" if noise < 0.015 else "élevé — pense à réduire le bruit / le gain micro"
+    print(f"  bruit de fond RMS = {noise:.4f}  ({verdict})\n")
+    return noise
 
 
 def main() -> None:
@@ -114,7 +128,7 @@ def main() -> None:
             _list_devices(pa)
             return
 
-        n_phrases = max(2, min(args.phrases, len(_REFERENCE_PHRASES)))
+        n_phrases = max(3, min(args.phrases, len(_REFERENCE_PHRASES)))
         device_index = _resolve_device(pa, args.device)
 
         embedder = SpeakerEmbedder(device="cpu")
@@ -123,27 +137,49 @@ def main() -> None:
         print()
         print("=== Enrôlement locuteur JERRY ===")
         print(f"{n_phrases} phrases · {args.seconds:.0f}s chacune · profil -> {args.output}")
-        print("Parle normalement, à ton débit habituel, à la distance habituelle du micro.")
-        print()
+        print("Parle normalement, à ton débit habituel, à distance constante du micro.\n")
+
+        noise_rms = _measure_noise(pa, config.sample_rate, device_index)
+        voiced_threshold = max(0.012, noise_rms * 2.0)
 
         embeddings: list[np.ndarray] = []
+        voiced_durations: list[float] = []
         for idx in range(n_phrases):
             phrase = _REFERENCE_PHRASES[idx]
             print(f"[{idx + 1}/{n_phrases}] Lis à voix haute :")
             print(f"    « {phrase} »")
-            input("    (Entrée quand tu es prêt) ")
-            _countdown("    Enregistrement dans")
-            print("    🎙️  ... parle maintenant", flush=True)
-            pcm = _record(pa, args.seconds, config.sample_rate, device_index)
-            rms = float(np.sqrt(np.mean((np.frombuffer(pcm, np.int16) / 32768.0) ** 2)))
-            if rms < 0.005:
-                print(f"    ⚠️  signal très faible (RMS={rms:.4f}) — vérifie le micro, on recommence.")
-                continue
-            embeddings.append(embedder.embed_pcm16(pcm, config.sample_rate))
-            print(f"    ✓ capturé (RMS={rms:.3f})\n")
 
-        if len(embeddings) < 2:
-            logger.error("Moins de 2 phrases exploitables — enrôlement abandonné.")
+            for attempt in range(1, _MAX_RETRIES + 1):
+                input("    (Entrée quand tu es prêt) ")
+                _countdown("    Enregistrement dans")
+                print("    🎙️  ... parle maintenant", flush=True)
+                samples = _record(pa, args.seconds, config.sample_rate, device_index)
+
+                voiced = _audio.keep_voiced(
+                    samples, config.sample_rate, threshold=voiced_threshold
+                )
+                voiced_s = voiced.size / config.sample_rate
+                if voiced_s < _MIN_VOICED_SECONDS:
+                    print(
+                        f"    ⚠️  seulement {voiced_s:.1f}s de voix nette détectée "
+                        f"(min {_MIN_VOICED_SECONDS}s) — on recommence cette phrase "
+                        f"(essai {attempt}/{_MAX_RETRIES}).\n"
+                    )
+                    continue
+
+                embeddings.append(embedder.embed_float(voiced, config.sample_rate))
+                voiced_durations.append(voiced_s)
+                print(f"    ✓ capturé ({voiced_s:.1f}s de voix nette)\n")
+                break
+            else:
+                print("    ✗ phrase abandonnée après plusieurs essais.\n")
+
+        if len(embeddings) < 3:
+            logger.error(
+                f"Seulement {len(embeddings)} phrase(s) exploitable(s) (min 3) — "
+                f"enrôlement abandonné. Réessaie dans un endroit plus calme, "
+                f"micro plus proche, ou --device sur le micro brut."
+            )
             sys.exit(1)
 
         profile = SpeakerProfile.from_embeddings(embeddings, sample_rate=config.sample_rate)
@@ -151,21 +187,25 @@ def main() -> None:
 
         consistency = profile.self_consistency()
         pairwise = profile.embeddings @ profile.centroid
+        dropped = len(embeddings) - profile.n_phrases
         print("=== Profil enregistré ===")
         print(f"  fichier            : {written}")
-        print(f"  phrases retenues   : {profile.n_phrases}")
+        print(f"  phrases retenues   : {profile.n_phrases}" + (f" ({dropped} écartée(s))" if dropped else ""))
+        print(f"  voix nette / phrase: moy {np.mean(voiced_durations):.1f}s")
         print(f"  cohérence interne  : {consistency:.3f} (min. cosinus entre phrases)")
         print(f"  phrase<->centroïde : min {pairwise.min():.3f} / moy {pairwise.mean():.3f}")
         print()
         if consistency < 0.55:
-            print("  ⚠️  cohérence faible : conditions d'enregistrement instables")
-            print("      (bruit, distance variable). Un ré-enrôlement au calme est conseillé.")
+            print("  ⚠️  cohérence encore faible malgré la découpe des silences.")
+            print("      Pistes : endroit plus calme, distance au micro vraiment constante,")
+            print("      baisser le gain (`pactl set-source-volume <source> 60%`),")
+            print("      ou enrôler sur le micro brut (`--device Razer`).")
         else:
             lo = round(max(0.0, pairwise.mean() - 0.20), 2)
             hi = round(max(lo + 0.05, pairwise.mean() - 0.08), 2)
             print("  Piste de calibrage initiale (à affiner avec un test voix tierce) :")
-            print(f"      JERRY_SPEAKER_REJECT_THRESHOLD={lo}")
-            print(f"      JERRY_SPEAKER_ACCEPT_THRESHOLD={hi}")
+            print(f"      export JERRY_SPEAKER_REJECT_THRESHOLD={lo}")
+            print(f"      export JERRY_SPEAKER_ACCEPT_THRESHOLD={hi}")
     finally:
         pa.terminate()
 

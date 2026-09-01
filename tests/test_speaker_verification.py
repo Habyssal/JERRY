@@ -35,7 +35,7 @@ _CONFIG = SpeakerConfig(
 
 
 class _FakeEmbedder:
-    def embed_pcm16(self, pcm: bytes, sample_rate: int = 16000) -> np.ndarray:
+    def embed_pcm16_voiced(self, pcm: bytes, sample_rate: int = 16000, **_) -> np.ndarray:
         return np.zeros(192, dtype=np.float32)
 
 
@@ -101,3 +101,31 @@ async def test_uncertain_emits_signal_without_forwarding_segment():
     down = await _run(0.38)
     assert [type(f).__name__ for f in down] == ["RTVIServerMessageFrame"]
     assert down[0].data["status"] == "uncertain"
+
+
+def test_keep_voiced_trims_silence():
+    from front.speaker import audio
+
+    sr = 16000
+    rng = np.random.default_rng(0)
+    silence = np.zeros(sr, dtype=np.float32)
+    speech = rng.normal(0, 0.2, sr).astype(np.float32)
+    trimmed = audio.keep_voiced(
+        np.concatenate([silence, speech, silence]), sr, threshold=0.02
+    )
+    # on garde la parole + le padding, on jette l'essentiel des 2 s de silence
+    assert sr * 0.8 < trimmed.size < sr * 1.6
+
+
+def test_from_embeddings_drops_single_outlier():
+    from front.speaker.profile import SpeakerProfile
+
+    base = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    tilted = np.array([0.9, 0.1, 0.0], dtype=np.float32)
+    tilted /= np.linalg.norm(tilted)
+    outlier = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    profile = SpeakerProfile.from_embeddings(
+        [base, base, tilted, tilted, outlier], sample_rate=16000
+    )
+    assert profile.n_phrases == 4  # l'aberrante est écartée
+    assert profile.centroid @ base > 0.98

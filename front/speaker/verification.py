@@ -137,7 +137,7 @@ class SpeakerVerificationGate(FrameProcessor):
 
         assert self._profile is not None, "gate non chargé (load())"
         embedding = await asyncio.to_thread(
-            self._embedder.embed_pcm16, pcm, self._config.sample_rate
+            self._embedder.embed_pcm16_voiced, pcm, self._config.sample_rate
         )
         score = self._profile.similarity(embedding)
 

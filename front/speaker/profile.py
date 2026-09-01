@@ -31,16 +31,38 @@ class SpeakerProfile:
     def n_phrases(self) -> int:
         return int(self.embeddings.shape[0])
 
-    @classmethod
-    def from_embeddings(
-        cls, embeddings: list[np.ndarray], *, sample_rate: int
-    ) -> "SpeakerProfile":
-        stack = np.vstack(embeddings).astype(np.float32)
+    @staticmethod
+    def _centroid(stack: np.ndarray) -> np.ndarray:
         mean = stack.mean(axis=0)
         norm = float(np.linalg.norm(mean))
-        centroid = (mean / norm if norm > 0.0 else mean).astype(np.float32)
+        return (mean / norm if norm > 0.0 else mean).astype(np.float32)
+
+    @classmethod
+    def from_embeddings(
+        cls,
+        embeddings: list[np.ndarray],
+        *,
+        sample_rate: int,
+        drop_outliers: bool = True,
+        outlier_margin: float = 0.15,
+    ) -> "SpeakerProfile":
+        """Construit le profil à partir des embeddings de référence. Si
+        `drop_outliers`, écarte les prises dont la similarité au centroïde est
+        inférieure de plus de `outlier_margin` à la moyenne (une seule prise
+        instable suffit à polluer le centroïde), tant qu'il reste >= 3 prises."""
+        stack = np.vstack(embeddings).astype(np.float32)
+
+        if drop_outliers:
+            while stack.shape[0] > 3:
+                centroid = cls._centroid(stack)
+                sims = stack @ centroid
+                worst = int(np.argmin(sims))
+                if sims[worst] >= sims.mean() - outlier_margin:
+                    break
+                stack = np.delete(stack, worst, axis=0)
+
         return cls(
-            centroid=centroid,
+            centroid=cls._centroid(stack),
             embeddings=stack,
             sample_rate=sample_rate,
             model_source=MODEL_SOURCE,

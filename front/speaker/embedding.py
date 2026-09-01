@@ -49,6 +49,26 @@ class SpeakerEmbedder:
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         return self.embed_float(audio, sample_rate)
 
+    def embed_pcm16_voiced(
+        self,
+        pcm: bytes,
+        sample_rate: int = 16000,
+        *,
+        noise_rms: float = 0.0,
+        min_seconds: float = 0.4,
+    ) -> np.ndarray:
+        """Comme `embed_pcm16` mais découpe d'abord les portions non-voisées
+        (silences, bruit de fond) — embedding plus stable. Repli sur l'audio
+        complet si la découpe laisse moins de `min_seconds` de voix."""
+        from front.speaker import audio as _audio
+
+        samples = _audio.to_float(pcm)
+        threshold = max(0.012, noise_rms * 2.0)
+        voiced = _audio.keep_voiced(samples, sample_rate, threshold=threshold)
+        if voiced.size < int(min_seconds * sample_rate):
+            voiced = samples
+        return self.embed_float(voiced, sample_rate)
+
     def embed_float(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """Embedding L2-normalisé (192-d) d'un segment float32 mono dans [-1, 1]."""
         if self._model is None:
