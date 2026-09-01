@@ -11,6 +11,7 @@ dependencies = [
     "nemo-toolkit[asr]==3.0.0",
     "pipecat-ai[kokoro,local,silero]==1.3.0",
     "sentence-transformers==5.5.1",
+    "speechbrain>=1.0,<2",
     "silero-vad==6.2.1",
     "torch",
     "torchaudio",
@@ -25,6 +26,12 @@ module-name = "front"
 requires = ["uv_build>=0.12.7,<0.13.0"]
 build-backend = "uv_build"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }
 torchaudio = { index = "pytorch-cu124" }
@@ -33,3 +40,6 @@ torchaudio = { index = "pytorch-cu124" }
 name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
 explicit = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

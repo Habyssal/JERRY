@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
+
+# Empreinte vocale enrôlée — donnée biométrique personnelle, jamais versionnée
+speaker_profile.npz
+*.speaker_profile.npz
