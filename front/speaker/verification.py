@@ -159,7 +159,7 @@ class SpeakerVerificationGate(FrameProcessor):
 
         assert self._profile is not None, "gate non chargé (load())"
         samples = _audio.to_float(seg_pcm)
-        threshold = max(0.012, self._noise_rms * 2.0)
+        threshold = max(0.008, self._noise_rms * 1.8)
         voiced = _audio.keep_voiced(samples, self._config.sample_rate, threshold=threshold)
         voiced_s = voiced.size / self._config.sample_rate
         scored = voiced if voiced_s >= _MIN_VOICED_FOR_TRIM else samples

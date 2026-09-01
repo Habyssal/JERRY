@@ -50,7 +50,8 @@ _ENROLL_PROMPTS = [
 ]
 
 _FRAMES_PER_BUFFER = 1024
-_MIN_VOICED_SECONDS = 4.0  # voix nette exigée par prise (ECAPA a besoin de plusieurs s)
+_TARGET_VOICED_SECONDS = 4.0  # cible par prise (ECAPA a besoin de plusieurs s)
+_ACCEPTABLE_VOICED_SECONDS = 2.0  # repli : on garde la prise si au moins ça
 _MAX_RETRIES = 3
 
 
@@ -179,7 +180,8 @@ def main() -> None:
         print("[Entrée] pour démarrer une prise, [Entrée] à nouveau quand tu as fini.\n")
 
         noise_rms = _measure_noise(pa, config.sample_rate, device_index)
-        voiced_threshold = max(0.012, noise_rms * 2.0)
+        voiced_threshold = max(0.008, noise_rms * 1.8)
+        print(f"  seuil de découpe voix : {voiced_threshold:.4f}\n")
 
         embeddings: list[np.ndarray] = []
         voiced_durations: list[float] = []
@@ -187,31 +189,42 @@ def main() -> None:
             prompt = _ENROLL_PROMPTS[idx]
             print(f"[{idx + 1}/{n_takes}] {prompt}")
 
+            best: tuple[float, np.ndarray] | None = None  # (voiced_s, voiced samples)
             for attempt in range(1, _MAX_RETRIES + 1):
                 input("    [Entrée] pour démarrer ")
                 print("    🎙️  enregistrement — parle, puis [Entrée] pour arrêter", flush=True)
                 samples = _read_until_enter(
                     pa, args.max_seconds, config.sample_rate, device_index
                 )
-
+                raw_s = samples.size / config.sample_rate
+                raw_rms = _audio.rms(samples)
                 voiced = _audio.keep_voiced(
                     samples, config.sample_rate, threshold=voiced_threshold
                 )
                 voiced_s = voiced.size / config.sample_rate
-                if voiced_s < _MIN_VOICED_SECONDS:
-                    print(
-                        f"    ⚠️  seulement {voiced_s:.1f}s de voix nette "
-                        f"(min {_MIN_VOICED_SECONDS}s) — parle plus longuement, "
-                        f"on recommence (essai {attempt}/{_MAX_RETRIES}).\n"
-                    )
-                    continue
+                print(
+                    f"    enregistré {raw_s:.1f}s (RMS {raw_rms:.4f}), "
+                    f"dont {voiced_s:.1f}s de voix nette"
+                )
+                if best is None or voiced_s > best[0]:
+                    best = (voiced_s, voiced)
 
-                embeddings.append(embedder.embed_float(voiced, config.sample_rate))
-                voiced_durations.append(voiced_s)
-                print(f"    ✓ capturé ({voiced_s:.1f}s de voix nette)\n")
-                break
+                if voiced_s >= _TARGET_VOICED_SECONDS:
+                    break
+                if attempt < _MAX_RETRIES:
+                    print(
+                        f"    ⚠️  < {_TARGET_VOICED_SECONDS:.0f}s — parle plus longuement "
+                        f"/ plus fort / plus près, on recommence "
+                        f"(essai {attempt}/{_MAX_RETRIES}).\n"
+                    )
+
+            if best is not None and best[0] >= _ACCEPTABLE_VOICED_SECONDS:
+                embeddings.append(embedder.embed_float(best[1], config.sample_rate))
+                voiced_durations.append(best[0])
+                print(f"    ✓ prise retenue ({best[0]:.1f}s de voix nette)\n")
             else:
-                print("    ✗ prise abandonnée après plusieurs essais.\n")
+                got = best[0] if best else 0.0
+                print(f"    ✗ prise abandonnée (max {got:.1f}s de voix nette).\n")
 
         if len(embeddings) < 3:
             logger.error(
