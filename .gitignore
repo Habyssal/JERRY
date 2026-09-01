@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.db
+*.log
 .env
 
 # Empreinte vocale enrôlée — donnée biométrique personnelle, jamais versionnée
