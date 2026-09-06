@@ -1,6 +1,18 @@
-"""Vérification du locuteur (LOT 1.5) — empreinte vocale ECAPA-TDNN, 100% local, CPU.
+"""Empreinte vocale ECAPA-TDNN — **non branché dans le pipeline** (décision 2026-09-01).
 
-Cascade d'écoute : VAD (Silero) -> [speaker verification] -> STT (Parakeet).
-Le gate rejette toute voix qui n'est pas celle de l'utilisateur enrôlé AVANT que
-le STT (GPU) ne tourne — d'où une conso GPU en veille quasi nulle.
+Le LOT 1.5 utilise un mot de réveil (`front/wakeword.py`), pas de vérification du
+locuteur : l'écart de domaine enrôlement (lecture) / runtime (conversationnel)
+rendait les scores de la vraie voix trop instables (0.2-0.6, jusqu'à négatif en
+souriant / à distance).
+
+Ce paquet est conservé pour le **futur module d'identification passive des voix
+récurrentes** : pas d'enrôlement explicite, mais des profils construits en
+continu à partir des interactions réelles, pour reconnaître les locuteurs
+habituels (cf. `Doc/Backlog.md`). Réutilisables tels quels :
+- `embedding.SpeakerEmbedder` — ECAPA-TDNN CPU
+- `audio` — mesure d'énergie, découpe des portions non-voisées
+- `profile.SpeakerProfile` — centroïde + scoring top-k
+
+`verification.SpeakerVerificationGate` et `front/enroll.py` (enrôlement amont)
+ne seront pas repris tels quels par le module passif.
 """
