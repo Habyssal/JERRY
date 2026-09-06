@@ -31,6 +31,7 @@ tête de conversation valide (jamais couper une paire `assistant(tool_calls)` /
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from loguru import logger
@@ -52,6 +53,22 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from front.services.tts_kokoro import KokoroTTSServiceFrEn
 
 _DEFAULT_MAX_HISTORY = 24
+
+# Une réponse vocale ne doit pas contenir d'emoji lu à voix haute ni de balisage
+# Markdown. Nettoyage per-chunk (le texte LLM est streamé) : on retire les emojis
+# et les marqueurs Markdown les plus courants (`* ` `#`). L'underscore est laissé
+# (fréquent dans les mots). Le durcissement de fond (persona figée) est au backlog.
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\U00002190-\U000021FF\U00002B00-\U00002BFF️‍]"
+)
+_MD_MARKERS_RE = re.compile(r"[*#`]+")
+
+
+def clean_for_speech(text: str) -> str:
+    """Retire emojis et marqueurs Markdown d'un fragment de texte destiné au TTS."""
+    text = _EMOJI_RE.sub("", text)
+    text = _MD_MARKERS_RE.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
 
 
 def _result_to_str(result) -> str:
@@ -143,6 +160,7 @@ class FrontConversation(FrameProcessor):
             self._assistant_buf = []
 
         elif isinstance(frame, LLMTextFrame):
+            frame.text = clean_for_speech(frame.text)
             if getattr(frame, "append_to_context", True):
                 self._assistant_buf.append(frame.text)
 
