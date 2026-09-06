@@ -63,3 +63,21 @@ async def test_command_window_expires():
     )
     assert tx == []  # la 2e n'est plus dans la fenêtre -> exige un nouveau réveil
     assert [e["status"] for e in events] == ["awake", "ignored"]
+
+
+@pytest.mark.asyncio
+async def test_command_continues_across_pause():
+    # « JOSS raconte » <pause, le VAD coupe> « une histoire courte »
+    tx, events = await _run(["JOSS raconte", "une histoire courte"])
+    assert tx == ["raconte", "une histoire courte"]
+    assert [e["status"] for e in events] == ["command", "command"]
+
+
+@pytest.mark.asyncio
+async def test_each_chunk_extends_the_window():
+    times = [0.0, 5.0, 10.0]  # timeout 8s : sans prolongation, le chunk à t=10 tomberait
+    clock = lambda: times.pop(0) if len(times) > 1 else times[0]  # noqa: E731
+    tx, _ = await _run(
+        ["JOSS début", "milieu", "fin"], command_timeout_s=8.0, time_fn=clock
+    )
+    assert tx == ["début", "milieu", "fin"]

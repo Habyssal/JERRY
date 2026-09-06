@@ -11,9 +11,12 @@ Parakeet, zéro dépendance). Remplaçable plus tard par un modèle wake-word d�
 
 Placé après le STT, avant l'écho :
 - **endormi** + transcription sans « JOSS » → ignorée (pas d'écho).
-- **endormi** + « JOSS <commande> » → la commande est transmise à l'aval.
-- **endormi** + « JOSS » seul → passe en écoute, la transcription suivante
-  (dans `command_timeout_s`) est traitée comme la commande.
+- **endormi** + « JOSS » (seul ou suivi d'une commande) → passe **éveillé** pour
+  `command_timeout_s`. Toute transcription reçue pendant cette fenêtre est
+  traitée comme (une suite de) la commande et **prolonge la fenêtre** — donc une
+  pause au milieu de la phrase, ou un barge-in, ne coupe pas le fil : pas besoin
+  de redire « JOSS ».
+- fenêtre expirée sans « JOSS » → retour au sommeil, transcription ignorée.
 - chaque changement d'état émet un événement RTVI `wake_word`.
 """
 
@@ -101,35 +104,40 @@ class WakeWordGate(FrameProcessor):
 
         text = frame.text.strip()
         now = self._time_fn()
-
-        if now < self._awaiting_command_until:
-            self._awaiting_command_until = 0.0
-            logger.info(f"WakeWordGate: commande (après réveil) — « {text} »")
-            await self._emit("command", text)
-            await self.push_frame(frame, direction)
-            return
+        awake = now < self._awaiting_command_until
 
         token, end = _first_token(text)
-        if self._is_wake_token(token):
-            rest = text[end:].lstrip(" ,.:;!?-–—»\"'").strip()
-            if rest:
-                logger.info(f"WakeWordGate: réveil + commande — « {rest} »")
-                await self._emit("command", rest)
-                await self.push_frame(
-                    TranscriptionFrame(rest, frame.user_id, time_now_iso8601(), frame.language),
-                    direction,
-                )
-            else:
-                self._awaiting_command_until = now + self._command_timeout_s
-                logger.info(
-                    f"WakeWordGate: réveil (« {self._wake_word} ») — écoute de la commande "
-                    f"({self._command_timeout_s:.0f}s)"
-                )
-                await self._emit("awake", "")
+        has_wake = self._is_wake_token(token)
+        if has_wake:
+            command = text[end:].lstrip(" ,.:;!?-–—»«\"'").strip()
+        else:
+            command = "" if not awake else text
+
+        if not awake and not has_wake:
+            logger.debug(f"WakeWordGate: ignoré (pas de mot de réveil) — « {text} »")
+            await self._emit("ignored", text)
             return
 
-        logger.debug(f"WakeWordGate: ignoré (pas de mot de réveil) — « {text} »")
-        await self._emit("ignored", text)
+        # Réveil, ou poursuite dans la fenêtre : (re)arme le compte à rebours.
+        self._awaiting_command_until = now + self._command_timeout_s
+
+        if not command:
+            logger.info(
+                f"WakeWordGate: réveil (« {self._wake_word} ») — écoute "
+                f"({self._command_timeout_s:.0f}s)"
+            )
+            await self._emit("awake", "")
+            return
+
+        logger.info(f"WakeWordGate: commande — « {command} »")
+        await self._emit("command", command)
+        if has_wake:
+            await self.push_frame(
+                TranscriptionFrame(command, frame.user_id, time_now_iso8601(), frame.language),
+                direction,
+            )
+        else:
+            await self.push_frame(frame, direction)
 
     async def _emit(self, status: str, text: str) -> None:
         await self.push_frame(
