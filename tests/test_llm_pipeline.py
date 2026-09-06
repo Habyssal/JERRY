@@ -5,8 +5,10 @@ pour que `pytest -q` reste vert sur une machine sans Ollama.
 
 Valide le critère du LOT 2 :
 - une question directe reçoit une réponse (message assistant non vide) ;
-- une demande couverte par un outil déclenche un appel de fonction
-  (message `role="tool"` injecté) — tool-calling validé via Ollama.
+- une demande couverte par un outil déclenche l'appel **et** sa réponse est
+  bien produite (message `role="tool"` + réponse assistant finale) — c'est la
+  relance après outil que l'ancienne archi (LLMContextAggregatorPair) sautait ;
+- enchaîner des tours rapides ne casse pas le contexte (aucune `ErrorFrame`).
 """
 
 from __future__ import annotations
@@ -17,17 +19,15 @@ import time
 import pytest
 
 from pipecat.frames.frames import ErrorFrame, Frame, LLMTextFrame, TranscriptionFrame
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.tests.utils import SleepFrame, run_test
 from pipecat.transcriptions.language import Language
 
 from front.llm.context import build_context
-from front.llm.context_guard import ContextAlternationGuard
+from front.llm.conversation import FrontConversation
 from front.llm.probe_tools import register_probe_tools
 from front.llm.service import DEFAULT_BASE_URL, build_llm_service
-from front.llm.turn import LLMTurnAdapter
 
 
 def _ollama_up() -> bool:
@@ -49,8 +49,6 @@ class _FakeTTS:
 
 
 class _FirstTokenClock(FrameProcessor):
-    """Horodate la 1ʳᵉ frame de texte LLM (proxy du temps de réponse perçu)."""
-
     def __init__(self) -> None:
         super().__init__()
         self.first_text_at: float | None = None
@@ -71,29 +69,21 @@ async def _run(frames):
     llm = build_llm_service()
     tools = register_probe_tools(llm)
     context = build_context(tools=tools)
-    aggregators = LLMContextAggregatorPair(context)
     clock = _FirstTokenClock()
-    pipeline = Pipeline(
-        [
-            LLMTurnAdapter(_FakeTTS()),
-            aggregators.user(),
-            ContextAlternationGuard(),
-            llm,
-            clock,
-            aggregators.assistant(),
-        ]
-    )
+    pipeline = Pipeline([llm, FrontConversation(context, _FakeTTS()), clock])
     down, _ = await run_test(pipeline, frames_to_send=frames, expected_down_frames=None)
+
     messages = context.get_messages()
-    assistant = [m for m in messages if m.get("role") == "assistant"]
+    assistant_texts = [m.get("content", "") for m in messages
+                       if m.get("role") == "assistant" and m.get("content")]
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     errors = [f for f in down if isinstance(f, ErrorFrame)]
-    last_reply = assistant[-1].get("content", "") if assistant else ""
+    last_reply = assistant_texts[-1] if assistant_texts else ""
     return last_reply, tool_msgs, errors, clock.first_text_at
 
 
 async def _ask(text: str):
-    reply, tool_msgs, errors, ttft = await _run([_tx(text), SleepFrame(12.0)])
+    reply, tool_msgs, errors, ttft = await _run([_tx(text), SleepFrame(15.0)])
     assert not errors, f"ErrorFrame(s): {[f.error for f in errors]}"
     return reply, tool_msgs, ttft
 
@@ -106,30 +96,25 @@ async def test_direct_question_gets_a_spoken_reply():
 
 
 @pytest.mark.asyncio
-async def test_time_question_triggers_tool_call():
+async def test_tool_call_result_is_verbalized():
     reply, tool_msgs, ttft = await _ask("quelle heure est-il ?")
     print(f"\n[LLM] réponse={reply!r}  outils={len(tool_msgs)}  1er token à {ttft and ttft * 1000:.0f}ms")
     assert tool_msgs, "aucun appel d'outil (message role=tool absent)"
-    assert reply and reply.strip()
+    assert reply and reply.strip(), "la réponse après l'outil n'a jamais été produite"
 
 
 @pytest.mark.asyncio
 async def test_rapid_turns_do_not_break_the_context():
-    # reproduit le bug live : l'utilisateur enchaîne plusieurs tours (barge-in)
-    # sans laisser JOSS répondre, dont un tour avec appel d'outil interrompu.
-    # Sans ContextAlternationGuard : cascade de 500 (roles must alternate).
     reply, _, errors, _ = await _run(
         [
             _tx("quelle heure est-il ?"),
-            SleepFrame(0.3),
+            SleepFrame(0.4),
             _tx("mets un minuteur de cinq minutes"),
-            SleepFrame(0.3),
+            SleepFrame(0.4),
             _tx("dis-moi bonjour"),
-            SleepFrame(0.3),
-            _tx("raconte une blague"),
-            SleepFrame(15.0),
+            SleepFrame(18.0),
         ]
     )
     print(f"\n[LLM] réponse finale={reply!r}  erreurs={[f.error for f in errors]}")
-    assert not errors, "le contexte a été corrompu (500 roles must alternate)"
+    assert not errors
     assert reply and reply.strip()

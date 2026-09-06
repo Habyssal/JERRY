@@ -3,9 +3,11 @@
 LOT 1   : boucle audio nue (écho).
 LOT 1.5 : le front ne réagit qu'après le mot de réveil (`front/wakeword.py`).
 LOT 2a  : LLM front (Ollama, Ministral 3 3B — bascule actée, xLAM tool-calling
-          cassé via Ollama) branché entre le mot de réveil et le TTS, avec
-          outils de démonstration pour valider le tool-calling. L'écho
-          (`front/echo.py`) est remplacé.
+          cassé via Ollama) branché après le mot de réveil, avec outils de
+          démonstration pour valider le tool-calling. La conversation (historique
+          + relances) est gérée par `front/llm/conversation.py` (`FrontConversation`),
+          pas par `LLMContextAggregatorPair` : l'autorité de tour est
+          `WakeWordGate`, pas le VAD. L'écho (`front/echo.py`) est remplacé.
 
 La vérification du locuteur (`front/speaker/`) reste **débranchée** — futur
 module passif d'identification des voix récurrentes (cf. Doc/Backlog.md).
@@ -21,7 +23,6 @@ from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
 from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.transcriptions.language import Language
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -29,10 +30,9 @@ from pipecat.workers.runner import WorkerRunner
 
 from front.barge_in import BargeInController
 from front.llm.context import build_context
-from front.llm.context_guard import ContextAlternationGuard
+from front.llm.conversation import FrontConversation, TTFALogger
 from front.llm.probe_tools import register_probe_tools
 from front.llm.service import build_llm_service
-from front.llm.turn import LLMTurnAdapter, TTFALogger
 from front.services.stt_parakeet import ParakeetSTTService
 from front.services.tts_kokoro import KokoroTTSServiceFrEn
 from front.wakeword import DEFAULT_WAKE_WORD, WakeWordGate
@@ -66,11 +66,9 @@ def build_pipeline() -> tuple[Pipeline, ParakeetSTTService]:
     llm = build_llm_service()
     tools = register_probe_tools(llm)
     context = build_context(tools=tools)
-    aggregators = LLMContextAggregatorPair(context)
 
-    adapter = LLMTurnAdapter(tts)
-    context_guard = ContextAlternationGuard()
-    ttfa_logger = TTFALogger(adapter)
+    conversation = FrontConversation(context, tts)
+    ttfa_logger = TTFALogger(conversation)
 
     pipeline = Pipeline(
         [
@@ -79,12 +77,9 @@ def build_pipeline() -> tuple[Pipeline, ParakeetSTTService]:
             barge_in,
             stt,
             wake_gate,
-            adapter,
-            aggregators.user(),
-            context_guard,
             llm,
+            conversation,
             tts,
-            aggregators.assistant(),
             ttfa_logger,
             transport.output(),
         ]
