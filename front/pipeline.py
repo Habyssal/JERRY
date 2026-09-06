@@ -46,6 +46,7 @@ def build_pipeline() -> tuple[Pipeline, ParakeetSTTService]:
     wake_gate = WakeWordGate(
         wake_word=os.environ.get("JERRY_WAKE_WORD", DEFAULT_WAKE_WORD).lower(),
         command_timeout_s=float(os.environ.get("JERRY_WAKE_TIMEOUT_S", "8")),
+        aggregation_silence_s=float(os.environ.get("JERRY_WAKE_AGG_SILENCE_S", "1.2")),
     )
     tts = KokoroTTSServiceFrEn(settings=KokoroTTSServiceFrEn.Settings(voice="ff_siwis", language=Language.FR))
     echo = EchoResponder(tts)

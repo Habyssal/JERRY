@@ -1,4 +1,4 @@
-"""LOT 1.5 — WakeWordGate : filtre les transcriptions selon le mot de réveil « JOSS »."""
+"""LOT 1.5 — WakeWordGate : réveil « JOSS » + agrégation d'un tour en un seul message."""
 
 from __future__ import annotations
 
@@ -6,78 +6,80 @@ import pytest
 
 from pipecat.frames.frames import TranscriptionFrame
 from pipecat.processors.frameworks.rtvi.frames import RTVIServerMessageFrame
-from pipecat.tests.utils import run_test
+from pipecat.tests.utils import SleepFrame, run_test
 from pipecat.transcriptions.language import Language
 
 from front.wakeword import WakeWordGate
+
+# Délais courts pour des tests rapides ; on utilise SleepFrame pour le temps réel.
+_AGG = 0.06
+_TIMEOUT = 0.4
 
 
 def _tx(text: str) -> TranscriptionFrame:
     return TranscriptionFrame(text, "", "2026-09-01T00:00:00Z", Language.FR)
 
 
-async def _run(texts, **kwargs):
+async def _run(items):
+    frames = [SleepFrame(x) if isinstance(x, float) else _tx(x) for x in items]
     down, _ = await run_test(
-        WakeWordGate(**kwargs),
-        frames_to_send=[_tx(t) for t in texts],
+        WakeWordGate(aggregation_silence_s=_AGG, command_timeout_s=_TIMEOUT),
+        frames_to_send=frames,
         expected_down_frames=None,
     )
-    tx = [f.text for f in down if isinstance(f, TranscriptionFrame)]
-    events = [f.data for f in down if isinstance(f, RTVIServerMessageFrame)]
-    return tx, events
-
-
-@pytest.mark.asyncio
-async def test_wake_word_prefix_forwards_command_only():
-    tx, events = await _run(["JOSS, quelle heure est-il ?"])
-    assert tx == ["quelle heure est-il ?"]
-    assert events[-1]["status"] == "command"
+    messages = [f.text for f in down if isinstance(f, TranscriptionFrame)]
+    statuses = [f.data["status"] for f in down if isinstance(f, RTVIServerMessageFrame)]
+    return messages, statuses
 
 
 @pytest.mark.asyncio
 async def test_no_wake_word_is_ignored():
-    tx, events = await _run(["bonjour tout le monde, ça va ?"])
-    assert tx == []
-    assert events[-1]["status"] == "ignored"
+    messages, statuses = await _run(["il fait beau aujourd'hui"])
+    assert messages == []
+    assert statuses == ["ignored"]
 
 
 @pytest.mark.asyncio
-async def test_wake_word_alone_then_next_utterance_is_command():
-    tx, events = await _run(["Joss.", "allume la lumière du salon"])
-    assert tx == ["allume la lumière du salon"]
-    assert [e["status"] for e in events] == ["awake", "command"]
+async def test_single_utterance_becomes_one_message():
+    messages, _ = await _run(["JOSS, quelle heure est-il ?"])
+    assert messages == ["quelle heure est-il ?"]
+
+
+@pytest.mark.asyncio
+async def test_chunks_are_aggregated_into_one_message():
+    # l'humain parle en 3 bouts (VAD coupe sur les pauses) -> UN seul message
+    messages, statuses = await _run(
+        ["JOSS raconte-moi", "une histoire", "assez courte s'il te plaît"]
+    )
+    assert messages == ["raconte-moi une histoire assez courte s'il te plaît"]
+    assert statuses.count("command") == 1
+    assert "listening" in statuses
+
+
+@pytest.mark.asyncio
+async def test_bare_wake_then_command():
+    messages, statuses = await _run(["Joss.", "allume la lumière du salon"])
+    assert messages == ["allume la lumière du salon"]
+    assert statuses[0] == "awake"
+
+
+@pytest.mark.asyncio
+async def test_pause_longer_than_aggregation_still_same_turn_within_window():
+    # pause de 0.15s > agrégation (0.06) mais < fenêtre : le 1er bout part,
+    # le 2e est pris comme enchaînement (fenêtre de suivi), pas ignoré
+    messages, _ = await _run(["JOSS lance la musique", 0.15, "monte le volume"])
+    assert messages == ["lance la musique", "monte le volume"]
+
+
+@pytest.mark.asyncio
+async def test_goes_back_to_sleep_after_window():
+    messages, statuses = await _run(["JOSS dis bonjour", 0.6, "il fait beau"])
+    assert messages == ["dis bonjour"]  # "il fait beau" arrive après le sommeil
+    assert statuses[-1] == "ignored"
+    assert "asleep" in statuses
 
 
 @pytest.mark.asyncio
 async def test_fuzzy_variant_is_accepted():
-    tx, _ = await _run(["Josse raconte-moi une blague"])
-    assert tx == ["raconte-moi une blague"]
-
-
-@pytest.mark.asyncio
-async def test_command_window_expires():
-    times = [0.0, 100.0]  # 2e transcription bien après le timeout
-    clock = lambda: times.pop(0) if len(times) > 1 else times[0]  # noqa: E731
-    tx, events = await _run(
-        ["JOSS", "allume la lumière"], command_timeout_s=8.0, time_fn=clock
-    )
-    assert tx == []  # la 2e n'est plus dans la fenêtre -> exige un nouveau réveil
-    assert [e["status"] for e in events] == ["awake", "ignored"]
-
-
-@pytest.mark.asyncio
-async def test_command_continues_across_pause():
-    # « JOSS raconte » <pause, le VAD coupe> « une histoire courte »
-    tx, events = await _run(["JOSS raconte", "une histoire courte"])
-    assert tx == ["raconte", "une histoire courte"]
-    assert [e["status"] for e in events] == ["command", "command"]
-
-
-@pytest.mark.asyncio
-async def test_each_chunk_extends_the_window():
-    times = [0.0, 5.0, 10.0]  # timeout 8s : sans prolongation, le chunk à t=10 tomberait
-    clock = lambda: times.pop(0) if len(times) > 1 else times[0]  # noqa: E731
-    tx, _ = await _run(
-        ["JOSS début", "milieu", "fin"], command_timeout_s=8.0, time_fn=clock
-    )
-    assert tx == ["début", "milieu", "fin"]
+    messages, _ = await _run(["Josh raconte une blague"])
+    assert messages == ["raconte une blague"]
