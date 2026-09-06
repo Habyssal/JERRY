@@ -29,6 +29,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from front.barge_in import BargeInController
 from front.llm.context import build_context
+from front.llm.context_guard import ContextAlternationGuard
 from front.llm.probe_tools import register_probe_tools
 from front.llm.service import build_llm_service
 from front.llm.turn import LLMTurnAdapter, TTFALogger
@@ -68,6 +69,7 @@ def build_pipeline() -> tuple[Pipeline, ParakeetSTTService]:
     aggregators = LLMContextAggregatorPair(context)
 
     adapter = LLMTurnAdapter(tts)
+    context_guard = ContextAlternationGuard()
     ttfa_logger = TTFALogger(adapter)
 
     pipeline = Pipeline(
@@ -79,6 +81,7 @@ def build_pipeline() -> tuple[Pipeline, ParakeetSTTService]:
             wake_gate,
             adapter,
             aggregators.user(),
+            context_guard,
             llm,
             tts,
             aggregators.assistant(),
